@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from random import getrandbits, randrange
 from threading import Event
@@ -23,7 +24,7 @@ def upload_image(filename: str) -> str:
 def search_qrcode(href: str,
                   uploaded_image_id: str,
                   necessary: Image.Image,
-                  filename: str,
+                  output: str,
                   found: Event,
                   ) -> None:
     """Finds a QR Code including a pixel-art. A found QR Code must include the
@@ -43,6 +44,7 @@ def search_qrcode(href: str,
                f'o={randrange(4)}&'    # Rotation (0-3)
                f's={getrandbits(32)}'  # Random seed (int64)
                )
+        print(f'Trying: {url}')
 
         # Generate a basic QR Code by QArt: https://research.swtch.com/qr/draw
         r = requests.get(url)
@@ -66,8 +68,9 @@ def search_qrcode(href: str,
 
         if info:
             # Found!
+            filename = os.path.join(output, f'{uuid.uuid4()}.png')
             canvas.save(filename)
-            print(filename, url)
+            print(f'Found: {filename}, {url}')
             found.set()
             break
 
@@ -96,7 +99,7 @@ def main(href: str,
     for i in range(concurrency):
         ex.submit(search_qrcode,
                   href, uploaded_image_id, necessary,
-                  filename=f'found/{i}.png', found=found)
+                  output='found/', found=found)
 
     try:
         found.wait()
