@@ -195,4 +195,4 @@ def main(href: str,
 
 
 if __name__ == '__main__':
-    main('https://subl.ee?▣', 'griffith2020.png', concurrency=16)
+    main('https://subl.ee?▣', 'griffith2019.png', concurrency=16)
