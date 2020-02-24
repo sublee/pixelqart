@@ -1,3 +1,4 @@
+import argparse
 import base64
 import io
 import itertools
@@ -6,23 +7,26 @@ import random
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from threading import Event
-from typing import Tuple
+from typing import IO, Tuple
 from urllib.parse import parse_qs, quote, urlparse
 
 import requests
-from PIL import Image, ImageFilter
+from PIL import Image
 from pyzbar.pyzbar import decode as decode_barcode
 
 QRCODE_SIZE = (41, 41)  # QR Code v6
 QART_MARGIN = 4
 
 
-def split_design(filename: str) -> Tuple[Image.Image, Image.Image]:
+def split_design(design: Image.Image) -> Tuple[Image.Image, Image.Image]:
     """Splits a design image to the desired part and necessary part. The design
     image may contain transparent pixels. Necessary In the design image,
     necessary black and white should be replaced with blue (#00f) and yellow
     (#ff0).
     """
+    assert design.mode == 'RGBA'
+    assert design.size == QRCODE_SIZE, design.size
+
     NECESSARY_BLACK = (0, 0, 255, 255)    # blue
     NECESSARY_WHITE = (255, 255, 0, 255)  # yellow
 
@@ -32,21 +36,16 @@ def split_design(filename: str) -> Tuple[Image.Image, Image.Image]:
     desired_pixels = desired.load()
     necessary_pixels = necessary.load()
 
-    with Image.open(filename) as img:
-        assert img.mode == 'RGBA'
-        assert img.size == QRCODE_SIZE, img.size
-
-        pixels = img.load()
-
-        for x, y in itertools.product(range(img.width), range(img.height)):
-            if pixels[x, y] == NECESSARY_BLACK:
-                desired_pixels[x, y] = (0, 0, 0, 255)
-                necessary_pixels[x, y] = (0, 0, 0, 255)
-            elif pixels[x, y] == NECESSARY_WHITE:
-                desired_pixels[x, y] = (255, 255, 255, 255)
-                necessary_pixels[x, y] = (255, 255, 255, 255)
-            else:
-                desired_pixels[x, y] = pixels[x, y]
+    pixels = design.load()
+    for x, y in itertools.product(range(design.width), range(design.height)):
+        if pixels[x, y] == NECESSARY_BLACK:
+            desired_pixels[x, y] = (0, 0, 0, 255)
+            necessary_pixels[x, y] = (0, 0, 0, 255)
+        elif pixels[x, y] == NECESSARY_WHITE:
+            desired_pixels[x, y] = (255, 255, 255, 255)
+            necessary_pixels[x, y] = (255, 255, 255, 255)
+        else:
+            desired_pixels[x, y] = pixels[x, y]
 
     return desired, necessary
 
@@ -64,16 +63,13 @@ def search_qrcode(name: str,
                   href: str,
                   uploaded_image_id: str,
                   necessary: Image.Image,
-                  found: Event,
+                  stop_event: Event,
+                  stop_if_found: bool,
                   ) -> None:
     """Finds a QR Code including a pixel-art. A found QR Code must include the
     necessary part.
     """
-    while True:
-        if found.is_set():
-            # Another thread has found.
-            break
-
+    while not stop_event.is_set():
         mask = random.randrange(8)
         orient = random.randrange(4)
         seed = random.getrandbits(32)
@@ -132,8 +128,9 @@ def search_qrcode(name: str,
         canvas.save(filename)
         print(f'Saved: {filename} (score: {score}, url: {url})')
 
-        found.set()
-        break
+        if stop_if_found:
+            stop_event.set()
+            break
 
 
 def eval_qrcode(qrcode: Image.Image) -> int:
@@ -165,34 +162,47 @@ def eval_qrcode(qrcode: Image.Image) -> int:
     return success
 
 
-def main(href: str,
-         design_filename: str,
-         concurrency: int,
-         ) -> None:
-    name, png = os.path.splitext(os.path.basename(design_filename))
-    assert png.lower() == '.png'
+parser = argparse.ArgumentParser()
+parser.add_argument('design', type=argparse.FileType('rb'))
+parser.add_argument('href')
+parser.add_argument('-n', '--concurrency', type=int, default=16)
+parser.add_argument('-x', '--stop-if-found', action='store_true')
 
-    desired, necessary = split_design(design_filename)
+
+def main(name: str,
+         design_file: IO[bytes],
+         href: str,
+         concurrency: int = 16,
+         stop_if_found: bool = False,
+         ) -> None:
+    with design_file, Image.open(design_file) as design:
+        desired, necessary = split_design(design)
 
     with desired, tempfile.NamedTemporaryFile() as f:
         desired.save(f, format='PNG')
         uploaded_image_id = upload_image(f.name)
 
-    found = Event()
+    stop_event = Event()
     ex = ThreadPoolExecutor()
     for i in range(concurrency):
         ex.submit(search_qrcode,
-                  name, href, uploaded_image_id, necessary, found)
+                  name, href, uploaded_image_id, necessary,
+                  stop_event, stop_if_found)
 
     try:
-        found.wait()
+        stop_event.wait()
     except KeyboardInterrupt:
         print('shutting down...')
     finally:
-        found.set()
+        stop_event.set()
         ex.shutdown()
         necessary.close()
 
 
 if __name__ == '__main__':
-    main('https://subl.ee?▣', 'griffith2019.png', concurrency=16)
+    args = parser.parse_args()
+
+    name, png = os.path.splitext(os.path.basename(args.design.name))
+    assert png.lower() == '.png'
+
+    main(name, args.design, args.href, args.concurrency, args.stop_if_found)
